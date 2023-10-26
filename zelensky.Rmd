@@ -1,0 +1,365 @@
+---
+title: "Analise de Discurso - Zelensky"
+output: html_document
+date: "2023-10-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Pacotes utilizados
+
+```{r}
+
+pacotes <- c("tidytext","ggplot2","dplyr","tibble","wordcloud","stringr","SnowballC","widyr","janeaustenr", "stopwords", "widyr", "readxl", "tm", "topicmodels","lda", "ldatuning","pals",
+             "kableExtra", "DT", "flextable", "tidyr","Hmisc","sentimentr")
+
+if(sum(as.numeric(!pacotes %in% installed.packages())) != 0){
+  instalador <- pacotes[!pacotes %in% installed.packages()]
+  for(i in 1:length(instalador)) {
+    install.packages(instalador, dependencies = T)
+    break()}
+  sapply(pacotes, require, character = T) 
+} else {
+  sapply(pacotes, require, character = T) 
+}
+
+library("dplyr")
+library("tidytext")
+library("wordcloud")
+library("stringr")
+library("SnowballC")
+library("tibble")
+library("janeaustenr")
+library("stopwords")
+library("widyr")
+library("readxl")
+library("tm")
+library("topicmodels")
+library("lda")
+library("ldatuning")
+library("pals")
+library("kableExtra")
+library("DT")
+library("flextable")
+library("tidyr")
+library("tidygraph")
+library("ggraph")
+library("Hmisc")
+library("sentimentr")
+
+
+
+```
+
+
+
+# Baixando os discursos
+
+```{r}
+
+url <- "https://github.com/pedropietrafesa/speech_Zelenskyy/raw/main/speech_e.xlsx"
+destfile <- "speech_e.xlsx"
+curl::curl_download(url, destfile)
+d <- read_excel(destfile)
+
+```
+
+
+
+# Tabela de Frequência com as palavras mais usadas
+
+```{r}
+# Transformando o data frame no formato Tibble, importante para o uso do pacote Tidytext
+d <- as_tibble(d)
+
+# Criando um novo data frame só com os discursos, sem as variáveis data e mês do discurso
+d1 <- d[,2]
+
+# Tokens
+d_unnested <- d1 %>%  unnest_tokens(word, speech)
+
+# Retirar números
+d_unnested <- d1 %>%  unnest_tokens(word, speech) %>% filter(!grepl('[0-9]', word))
+
+# Retirar as stop words e obter os tokens
+d_unnested <- d_unnested %>%  anti_join(stop_words)
+
+# Contar as palavras mais comuns
+
+c <- d_unnested %>%  count(word, sort = TRUE)
+
+# Criando um novo data frame com as 50 palavras mais faladas por Zelensky no primeiro ano de guerra 
+
+c50 <- c %>% filter(n > 429)
+
+# Gráfico com a distribuição de frequência das palavras mais ditas por Zelensky
+
+c50 %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word)) +
+  geom_col()+
+  ggtitle("As 50 palavras mais usadas nos discursos de Zelensky")
+
+```
+
+# word cloud com as 50 palavras mais usadas por Zelensky
+
+```{r}
+
+# Definição da paleta de cores
+pal <- brewer.pal(8,"Dark2")
+
+# Word cloud
+c50 %>% with(wordcloud(word, n, random.order = FALSE, colors=pal))
+
+
+```
+
+# Bi-grams
+
+```{r}
+
+d_bigrams <- d1 %>% unnest_tokens(word, speech, token = "ngrams", n = 2) %>% filter(!grepl('[0-9]', word))
+
+
+
+d_bigrams <- d_bigrams %>% 
+  separate(word, into = c("word1", "word2"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>% 
+  unite(word, c(word1, word2), sep = " ")
+
+```
+
+
+# redes - Conexões entre as palavras 
+
+```{r}
+
+
+# Separandando as duas palavras em colunas
+
+d_separated <- d_bigrams %>%  
+  separate(word, into = c("word1", "word2"), sep = " ")
+
+
+# Contando a quantidade de vezes que as palavras apareceram juntas 
+bigram_counts <- d_separated %>% 
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word) %>% 
+  count(word1, word2, sort = TRUE)
+
+
+# Criando o gráfico de rede 
+bigram_graph <- bigram_counts %>% 
+  filter(n > 20) %>%
+  as_tbl_graph()
+
+ggraph(bigram_graph, layout = "fr") + 
+  geom_edge_link() + 
+  geom_node_point() + 
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1)
+
+
+
+```
+
+## Redes das palavras relacionadas a mulheres e crianças
+
+
+```{r}
+
+# Selecionando a rede de conexões das palavras relacionadas ass mulheres e crianças 
+
+bigram_graph1 <- bigram_counts %>% 
+  filter(word1 == "women" | word2 == "women" | word1 == "children" | word2 == "children"
+         | word1 == "child" | word1 == "woman" | word2 == "woman") %>%
+  as_tbl_graph()
+
+
+# Grafo da rede
+
+ggraph(bigram_graph1, layout = "fr") + 
+  geom_edge_link() + 
+  geom_node_point() + 
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1)
+
+
+```
+
+
+# Modelagem de Tópicos (Temas expostos nos discursos do Zelensky)
+
+```{r}
+
+# Organizando o banco de dados para o pacote TM
+# Usando o data frame d
+
+# Criando a coluna doc_id para leitura no pacote TM
+d$doc_id <- c(1:590)
+
+# renomeando a variável speech para text, também para leitura no pacote TM
+d <- d %>% rename(text = speech)
+
+# Mudando as variáveis doc_id e text de posição
+d <- d %>% select(doc_id, text, everything())
+
+
+# Carregando  stopwords
+english_stopwords <- readLines("https://slcladal.github.io/resources/stopwords_en.txt", encoding = "UTF-8")
+
+# Retirando as stop words, números, pontuação, caracteres especiais e espaços em branco. 
+
+corpus = VCorpus(VectorSource(d$text)) 
+corpus = tm_map(corpus, content_transformer(tolower)) 
+corpus = tm_map(corpus, removeNumbers) 
+corpus = tm_map(corpus, removePunctuation) 
+corpus = tm_map(corpus, removeWords, english_stopwords) 
+corpus = tm_map(corpus, stripWhitespace) 
+
+
+# O pacote topicmodels requer requires um objeto DocumentTermMatrix do pacote TM para modelar os tópicos do texto coletado
+
+# Limitar o número de palavras pela frequência dita por Zelensky
+mf <- 2
+
+# Objeto DocumentTermMatrix 
+DTM <- DocumentTermMatrix(corpus, control = list(bounds = list(global = c(mf, Inf))))
+
+# devido ao corte  de vocabulário realizado na etapa anterior, há linhas vazias no objeto DTM, o LDA não roda bem com linhas vaizas. Desta forma, remover esses espaços do DTM 
+sel_idx <- slam::row_sums(DTM) > 0
+DTM <- DTM[sel_idx, ]
+
+# para determinar o número ótimo de tópicos,  selecionar o k (número de tópicos) o menor valor do teste Cao Juan e o maior Deveaud
+result <- ldatuning::FindTopicsNumber(
+  DTM,
+  topics = seq(from = 2, to = 20, by = 1),
+  metrics = c("Griffiths2004","CaoJuan2009", "Deveaud2014","Arun2010"),
+  method = "Gibbs",
+  control = list(seed = 77),
+  verbose = TRUE
+)
+
+# Visualização dos testes Coa Juan e Deveaud 
+
+FindTopicsNumber_plot(result)
+
+# número de tópicos
+K <- 20
+# estabelecer set seed para replicar 
+set.seed(2023)
+
+# Calcular o o modelo a partir Latent Dirichlet Allocation (LDA),  via 1000 interações amostrais de Gibbs 
+topicModel <- LDA(DTM, K, method="Gibbs", control=list(iter = 1000, verbose = 25))
+
+# Expor os termos de cada tópico
+
+kable(terms(topicModel, 50), booktabs = TRUE)
+
+
+# A inferência da modelagem de tópicos resulta em duas distribuições de probabilidades posteriores (aproximadas): uma distribuição teta sobre os K tópicos dentro de cada documento e uma distribuição beta sobre V termos dentro de cada tópico, onde V representa o comprimento do vocabulário (V = 7277), número de termos.
+
+# Distribuições posteriores
+tmResult <- posterior(topicModel)
+theta <- tmResult$topics
+beta <- tmResult$terms
+
+
+# Ranqueamento dos tópicos
+# Os termos mais comuns como nomes dos tópicos
+topicNomes <- apply(lda::top.topic.words(beta, 5, by.score = T), 2, paste, collapse = " ")
+
+# Os tópicos mais prováveis dos discursos de Zelensky
+topicProportions <- colSums(theta) / nDocs(DTM)  # Média das probabilidades em relação a todos os discursos
+names(topicProportions) <- topicNomes     # Inserindo os nomes dos tópicos 
+kable(round(sort(topicProportions, decreasing = TRUE),4), booktabs = TRUE) # Demonstrando as proporções em ordem decrescente 
+
+
+# Gráfico com a distribuição dos tópicos por mês 
+
+topicNames <- apply(terms(topicModel, 5), 2, paste, collapse = " ") 
+topic_proportion_per_mouth <- aggregate(theta, by = list(month = d$month), mean)
+# set topic names to aggregated columns
+colnames(topic_proportion_per_mouth)[2:(K+1)] <- topicNames
+# reshape data frame
+vizDataFrame <- reshape2::melt(topic_proportion_per_mouth, id.vars = "month")
+# plot topic proportions per decade as bar plot
+ggplot(vizDataFrame, aes(x= factor(month, level = c('feb22','mar22','apr22','may22',
+                                                    'jun22','jul22','ago22','sep22',
+                                                    'oct22', 'nov22','dec22','jan23',
+                                                    'feb23')),y=value, fill=variable)) + 
+  geom_bar(stat = "identity") +
+  xlab("Mês") +
+  ylab("Proporção") + 
+  scale_fill_manual(values = paste0(alphabet(20), "FF"), name = "Tópicos") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+
+```
+
+
+
+# Análise de Sentimentos (Emoções)
+
+A análise de sentimentos extrai informações sobre sentimentos, emoções ou opiniões por meio da linguagem natural. A maior parte da análise de sentimento observa informações sobre polaridade negativa ou positiva, mas também pode analisar oito emoções utilizando os léxicos da Word-Emotion Association Lexicon (Mohammad e Turney, 2013). 
+
+O dicionário de  léxicos "NRC" criados pela Word-Emotion Association Lexicon utilizados para observar as emoções dos discursos de Zelensky foram extraidos do pacote "tidytext". 
+
+
+
+
+```{r}
+
+# Combinando os dados com os léxicos da Word-Emotion Association Lexicon (Mohammad e Turney, 2013). 
+
+d_lexicon <- d_unnested %>% 
+  dplyr::mutate(words = n()) %>%
+  dplyr::left_join(tidytext::get_sentiments("nrc")) %>%
+  dplyr::mutate(word = factor(word),
+         sentiment = factor(sentiment))
+
+
+# Calculando a frenquência em que as emoções aparecem nos discursos de Zelensky
+
+d_lex_freq <- d_lexicon %>%
+  dplyr::group_by(word, sentiment) %>%
+  dplyr::summarise(sentiment = unique(sentiment),
+                   sentiment_freq = n(),
+                   words = unique(words)) %>%
+  dplyr::filter(is.na(sentiment) == F) %>%
+  dplyr::mutate(percentage = round(sentiment_freq/words*100, 1))
+
+
+# Gráfico com as frequências das emoções
+
+d_lex_freq %>%
+  dplyr::filter(sentiment != "positive",
+         sentiment != "negative") %>%
+  dplyr::group_by(sentiment) %>%
+  dplyr::summarise(sentiment_freq = n()) %>%
+  dplyr::mutate(percentage = round((sentiment_freq/sum(sentiment_freq))*100, 2)) %>%
+  ggplot(aes(sentiment, percentage, fill = sentiment)) +    
+  geom_bar(stat="identity", position=position_dodge()) + 
+  geom_text(aes(label = percentage), vjust = - 0.5) +
+  scale_fill_manual(name = "", values=c("orange", "gray70", "red", "grey30", "blue",
+                                        "black", "green4", "brown")) +
+  theme_bw() +
+  theme(legend.position = "right") +
+  xlab("Emoções") +
+  ylab("Porcentagem")
+
+
+
+
+```
+
+
+
+
+
+
+
